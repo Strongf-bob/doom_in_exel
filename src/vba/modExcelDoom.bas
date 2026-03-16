@@ -155,7 +155,10 @@ Public Sub ExcelDoom_Shoot()
 
     mAmmo = mAmmo - 1
     mMuzzleFlashTicks = 1
-    hitIndex = FindShootTarget()
+    hitIndex = mTargetIndex
+    If hitIndex = 0 Then
+        hitIndex = FindShootTarget()
+    End If
 
     If hitIndex > 0 Then
         mEnemies(hitIndex).Health = mEnemies(hitIndex).Health - 1
@@ -305,7 +308,7 @@ Private Sub ApplyEnemyAttacks()
 End Sub
 
 Private Function FindShootTarget() As Long
-    FindShootTarget = FindAimedEnemy(0.07)
+    FindShootTarget = FindAimedEnemy(0.24)
 End Function
 
 Private Function FindAimedEnemy(ByVal aimWindow As Double) As Long
@@ -350,6 +353,7 @@ Private Function HasLineOfSight(ByVal targetX As Double, ByVal targetY As Double
 End Function
 
 Private Sub RenderFrame()
+    Dim previousScreenUpdating As Boolean
     Dim lines(1 To VIEW_HEIGHT) As String
     Dim rowIndex As Long
     Dim colIndex As Long
@@ -360,7 +364,11 @@ Private Sub RenderFrame()
     Dim floorRow As Long
     Dim wallGlyph As String
 
-    mTargetIndex = FindAimedEnemy(0.16)
+    On Error GoTo RenderCleanup
+    previousScreenUpdating = Application.ScreenUpdating
+    Application.ScreenUpdating = False
+
+    mTargetIndex = FindAimedEnemy(0.24)
 
     For rowIndex = 1 To VIEW_HEIGHT
         lines(rowIndex) = String$(VIEW_WIDTH, " ")
@@ -397,6 +405,9 @@ Private Sub RenderFrame()
     SetViewportText JoinLines(lines)
     SetMapText BuildMapText()
     SetHudText BuildHudText()
+
+RenderCleanup:
+    Application.ScreenUpdating = previousScreenUpdating
 End Sub
 
 Private Sub RenderEnemiesInto(ByRef lines() As String)
@@ -576,7 +587,8 @@ Private Function BuildMapText() As String
     BuildMapText = BuildMapText & "A/D or Left/Right Turn" & vbLf
     BuildMapText = BuildMapText & "Q/E Strafe" & vbLf
     BuildMapText = BuildMapText & "Space Shoot" & vbLf
-    BuildMapText = BuildMapText & "P Pause  R Reset"
+    BuildMapText = BuildMapText & "P Pause  R Reset" & vbLf & vbLf
+    BuildMapText = BuildMapText & "g grunt  s stalker  B brute"
 End Function
 
 Private Function IsEnemyOnTile(ByVal mapX As Long, ByVal mapY As Long) As Boolean
@@ -868,7 +880,11 @@ Private Sub EnsureTextBox(ByVal ws As Worksheet, ByVal shapeName As String, ByVa
         .TextFrame2.MarginRight = 8
         .TextFrame2.MarginTop = 6
         .TextFrame2.MarginBottom = 6
-        .TextFrame2.WordWrap = msoTrue
+        If shapeName = SHAPE_VIEWPORT Or shapeName = SHAPE_MAP Then
+            .TextFrame2.WordWrap = msoFalse
+        Else
+            .TextFrame2.WordWrap = msoTrue
+        End If
         .Placement = xlFreeFloating
     End With
 End Sub
@@ -946,11 +962,11 @@ End Function
 
 Private Function BuildTargetText() As String
     If mTargetIndex > 0 Then
-        BuildTargetText = "TARGET " & GetEnemyName(mEnemies(mTargetIndex).Kind) & "  HP " & mEnemies(mTargetIndex).Health & "/" & mEnemies(mTargetIndex).MaxHealth & "  PRESS SPACE"
+        BuildTargetText = "TARGET LOCK " & GetEnemyName(mEnemies(mTargetIndex).Kind) & "  HP " & mEnemies(mTargetIndex).Health & "/" & mEnemies(mTargetIndex).MaxHealth & "  PRESS SPACE"
     ElseIf mPaused Then
         BuildTargetText = "PAUSED  Press P to resume or R to restart"
     Else
-        BuildTargetText = "TARGET NONE  Use minimap, keep enemy near center, X means target lock"
+        BuildTargetText = "TARGET NONE  Keep enemy near center. X means target lock."
     End If
 End Function
 
@@ -974,21 +990,21 @@ Private Function GetEnemyGlyph(ByVal enemyIndex As Long) As String
     Select Case mEnemies(enemyIndex).Kind
         Case ENEMY_STALKER
             If mEnemies(enemyIndex).Health = 1 Then
-                GetEnemyGlyph = "r"
+                GetEnemyGlyph = "s"
             Else
-                GetEnemyGlyph = "R"
+                GetEnemyGlyph = "s"
             End If
         Case ENEMY_BRUTE
             If mEnemies(enemyIndex).Health <= 2 Then
-                GetEnemyGlyph = "h"
+                GetEnemyGlyph = "b"
             Else
-                GetEnemyGlyph = "H"
+                GetEnemyGlyph = "B"
             End If
         Case Else
             If mEnemies(enemyIndex).Health = 1 Then
-                GetEnemyGlyph = "m"
+                GetEnemyGlyph = "g"
             Else
-                GetEnemyGlyph = "M"
+                GetEnemyGlyph = "g"
             End If
     End Select
 
