@@ -405,6 +405,7 @@ Private Sub RenderFrame()
     SetViewportText JoinLines(lines)
     SetMapText BuildMapText()
     SetHudText BuildHudText()
+    FocusViewport
 
 RenderCleanup:
     Application.ScreenUpdating = previousScreenUpdating
@@ -583,11 +584,11 @@ Private Function BuildMapText() As String
     Next mapRow
 
     BuildMapText = BuildMapText & vbLf & vbLf & "Controls" & vbLf
-    BuildMapText = BuildMapText & "W/S or Up/Down  Move" & vbLf
-    BuildMapText = BuildMapText & "A/D or Left/Right Turn" & vbLf
-    BuildMapText = BuildMapText & "Q/E Strafe" & vbLf
+    BuildMapText = BuildMapText & "Up/Down or W/S Move" & vbLf
+    BuildMapText = BuildMapText & "Left/Right or A/D Turn" & vbLf
+    BuildMapText = BuildMapText & "Shift+Left/Right Strafe" & vbLf
     BuildMapText = BuildMapText & "Space Shoot" & vbLf
-    BuildMapText = BuildMapText & "P Pause  R Reset" & vbLf & vbLf
+    BuildMapText = BuildMapText & "F8 Pause  F5 Reset" & vbLf & vbLf
     BuildMapText = BuildMapText & "g grunt  s stalker  B brute"
 End Function
 
@@ -843,8 +844,9 @@ Private Sub ShowIdleScreen()
     idleText = idleText & "  Press START or run ExcelDoom_StartGame."
 
     SetViewportText idleText
-    SetMapText "MAP" & vbLf & vbLf & "W/S or Up/Down  Move" & vbLf & "A/D or Left/Right Turn" & vbLf & "Q/E Strafe" & vbLf & "Space Shoot"
+    SetMapText "MAP" & vbLf & vbLf & "Up/Down or W/S Move" & vbLf & "Left/Right or A/D Turn" & vbLf & "Shift+Left/Right Strafe" & vbLf & "Space Shoot" & vbLf & "F8 Pause  F5 Reset"
     SetHudText "Готово. Запускай игру."
+    FocusViewport
 End Sub
 
 Private Function GetGameSheet() As Worksheet
@@ -946,6 +948,12 @@ End Sub
 
 Private Sub SetMapText(ByVal textValue As String)
     GetGameSheet.Shapes(SHAPE_MAP).TextFrame2.TextRange.Text = textValue
+End Sub
+
+Private Sub FocusViewport()
+    On Error Resume Next
+    GetGameSheet.Shapes(SHAPE_VIEWPORT).Select
+    On Error GoTo 0
 End Sub
 
 Private Function BuildStateText() As String
@@ -1084,6 +1092,10 @@ Private Sub BindKeys()
     Application.OnKey "{DOWN}", "ExcelDoom_MoveBackward"
     Application.OnKey "{LEFT}", "ExcelDoom_TurnLeft"
     Application.OnKey "{RIGHT}", "ExcelDoom_TurnRight"
+    Application.OnKey "+{LEFT}", "ExcelDoom_StrafeLeft"
+    Application.OnKey "+{RIGHT}", "ExcelDoom_StrafeRight"
+    Application.OnKey "{F5}", "ExcelDoom_ResetGame"
+    Application.OnKey "{F8}", "ExcelDoom_TogglePause"
     Application.OnKey "w", "ExcelDoom_MoveForward"
     Application.OnKey "s", "ExcelDoom_MoveBackward"
     Application.OnKey "a", "ExcelDoom_TurnLeft"
@@ -1103,6 +1115,10 @@ Private Sub UnbindKeys()
     Application.OnKey "{DOWN}"
     Application.OnKey "{LEFT}"
     Application.OnKey "{RIGHT}"
+    Application.OnKey "+{LEFT}"
+    Application.OnKey "+{RIGHT}"
+    Application.OnKey "{F5}"
+    Application.OnKey "{F8}"
     Application.OnKey "w"
     Application.OnKey "s"
     Application.OnKey "a"
