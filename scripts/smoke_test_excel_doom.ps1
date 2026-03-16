@@ -26,9 +26,12 @@ try {
     $workbook = $excel.Workbooks.Open($WorkbookPath)
 
     $excel.Run("'$($workbook.Name)'!ExcelDoom_StartGame")
+    $excel.Run("'$($workbook.Name)'!ExcelDoom_TogglePause")
+    $excel.Run("'$($workbook.Name)'!ExcelDoom_TogglePause")
     $excel.Run("'$($workbook.Name)'!ExcelDoom_MoveForward")
     $excel.Run("'$($workbook.Name)'!ExcelDoom_TurnRight")
     $excel.Run("'$($workbook.Name)'!ExcelDoom_Shoot")
+    $excel.Run("'$($workbook.Name)'!ExcelDoom_ResetGame")
     $excel.Run("'$($workbook.Name)'!ExcelDoom_StopGame")
 }
 finally {

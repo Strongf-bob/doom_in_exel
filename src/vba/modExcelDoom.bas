@@ -13,6 +13,9 @@ Private Const STRAFE_STEP As Double = 0.24
 Private Const TURN_STEP As Double = 0.17
 Private Const PLAYER_RADIUS As Double = 0.16
 Private Const ENEMY_COUNT As Long = 6
+Private Const ENEMY_GRUNT As Long = 1
+Private Const ENEMY_STALKER As Long = 2
+Private Const ENEMY_BRUTE As Long = 3
 Private Const UI_SHEET As String = "DOOM"
 Private Const SHAPE_VIEWPORT As String = "doom_viewport"
 Private Const SHAPE_TITLE As String = "doom_title"
@@ -22,7 +25,13 @@ Private Const SHAPE_MAP As String = "doom_map"
 Private Type EnemyState
     X As Double
     Y As Double
+    Kind As Long
+    MaxHealth As Long
     Health As Long
+    Speed As Double
+    AttackRange As Double
+    AttackDamage As Long
+    CooldownMax As Long
     Cooldown As Long
     Alive As Boolean
 End Type
@@ -36,9 +45,11 @@ Private mAmmo As Long
 Private mHealth As Long
 Private mKills As Long
 Private mStarted As Boolean
+Private mPaused As Boolean
 Private mKeysBound As Boolean
 Private mMuzzleFlashTicks As Long
 Private mLastMessage As String
+Private mTargetIndex As Long
 Private mWallDistances(1 To VIEW_WIDTH) As Double
 
 Public Sub ExcelDoom_ConfigureSheet()
@@ -58,6 +69,7 @@ Public Sub ExcelDoom_StartGame()
     mHealth = 100
     mKills = 0
     mStarted = True
+    mPaused = False
     mMuzzleFlashTicks = 0
     mLastMessage = "Очисти уровень и не дай демонам подойти вплотную."
 
@@ -71,11 +83,28 @@ End Sub
 
 Public Sub ExcelDoom_StopGame()
     mStarted = False
+    mPaused = False
     mMuzzleFlashTicks = 0
     UnbindKeys
     SetupSheet
     ShowIdleScreen
     SetHudText "Остановлено. Нажми START или запусти ExcelDoom_StartGame."
+End Sub
+
+Public Sub ExcelDoom_TogglePause()
+    If Not mStarted Then
+        SetHudText "Игра не запущена. Нажми START."
+        Exit Sub
+    End If
+
+    mPaused = Not mPaused
+    If mPaused Then
+        mLastMessage = "Пауза. P продолжает игру, R начинает заново."
+    Else
+        mLastMessage = "Пауза снята. Демоны снова активны."
+    End If
+
+    RenderFrame
 End Sub
 
 Public Sub ExcelDoom_MoveForward()
@@ -145,8 +174,10 @@ Public Sub ExcelDoom_Shoot()
 End Sub
 
 Private Function EnsureRunning() As Boolean
-    If mStarted Then
+    If mStarted And Not mPaused Then
         EnsureRunning = True
+    ElseIf mPaused Then
+        SetHudText "Пауза. Нажми P для продолжения или R для рестарта."
     Else
         SetHudText "Игра не запущена. Нажми START или запусти ExcelDoom_StartGame."
     End If
@@ -200,8 +231,8 @@ Private Sub MoveEnemies()
             If distanceToPlayer > 1.2 Then
                 dirX = (mPlayerX - mEnemies(i).X) / distanceToPlayer
                 dirY = (mPlayerY - mEnemies(i).Y) / distanceToPlayer
-                moveX = dirX * 0.12
-                moveY = dirY * 0.12
+                moveX = dirX * mEnemies(i).Speed
+                moveY = dirY * mEnemies(i).Speed
                 nextX = mEnemies(i).X + moveX
                 nextY = mEnemies(i).Y + moveY
 
@@ -247,17 +278,17 @@ Private Sub ApplyEnemyAttacks()
     For i = 1 To ENEMY_COUNT
         If mEnemies(i).Alive Then
             distanceToPlayer = Distance(mEnemies(i).X, mEnemies(i).Y, mPlayerX, mPlayerY)
-            If distanceToPlayer < 5.2 And HasLineOfSight(mEnemies(i).X, mEnemies(i).Y) Then
+            If distanceToPlayer < mEnemies(i).AttackRange And HasLineOfSight(mEnemies(i).X, mEnemies(i).Y) Then
                 If mEnemies(i).Cooldown = 0 Then
-                    pressure = pressure + 1
-                    mEnemies(i).Cooldown = 2
+                    pressure = pressure + mEnemies(i).AttackDamage
+                    mEnemies(i).Cooldown = mEnemies(i).CooldownMax
                 End If
             End If
         End If
     Next i
 
     If pressure > 0 Then
-        mHealth = mHealth - (pressure * 7)
+        mHealth = mHealth - pressure
         If mHealth < 0 Then mHealth = 0
         mLastMessage = "Тебя обстреливают. Меняй позицию."
     End If
@@ -274,6 +305,10 @@ Private Sub ApplyEnemyAttacks()
 End Sub
 
 Private Function FindShootTarget() As Long
+    FindShootTarget = FindAimedEnemy(0.07)
+End Function
+
+Private Function FindAimedEnemy(ByVal aimWindow As Double) As Long
     Dim i As Long
     Dim enemyDistance As Double
     Dim enemyAngle As Double
@@ -286,10 +321,10 @@ Private Function FindShootTarget() As Long
             enemyDistance = Distance(mPlayerX, mPlayerY, mEnemies(i).X, mEnemies(i).Y)
             enemyAngle = NormalizeRelativeAngle(Atan2(mEnemies(i).Y - mPlayerY, mEnemies(i).X - mPlayerX) - mPlayerAngle)
 
-            If Abs(enemyAngle) <= 0.07 And enemyDistance < bestDistance Then
+            If Abs(enemyAngle) <= aimWindow And enemyDistance < bestDistance Then
                 If HasLineOfSight(mEnemies(i).X, mEnemies(i).Y) Then
                     bestDistance = enemyDistance
-                    FindShootTarget = i
+                    FindAimedEnemy = i
                 End If
             End If
         End If
@@ -324,6 +359,8 @@ Private Sub RenderFrame()
     Dim ceilingRow As Long
     Dim floorRow As Long
     Dim wallGlyph As String
+
+    mTargetIndex = FindAimedEnemy(0.16)
 
     For rowIndex = 1 To VIEW_HEIGHT
         lines(rowIndex) = String$(VIEW_WIDTH, " ")
@@ -425,7 +462,7 @@ Private Sub RenderEnemiesInto(ByRef lines() As String)
 
                 topRow = (VIEW_HEIGHT \ 2) - (spriteHeight \ 2)
                 leftCol = screenX - (spriteWidth \ 2)
-                glyph = IIf(mEnemies(i).Health = 1, "8", "M")
+                glyph = GetEnemyGlyph(i)
 
                 For drawRow = 0 To spriteHeight - 1
                     For drawCol = 0 To spriteWidth - 1
@@ -474,11 +511,18 @@ End Sub
 Private Sub RenderCrosshairInto(ByRef lines() As String)
     Dim centerRow As Long
     Dim centerCol As Long
+    Dim crosshairGlyph As String
 
     centerRow = VIEW_HEIGHT \ 2
     centerCol = VIEW_WIDTH \ 2
 
-    Mid$(lines(centerRow), centerCol, 1) = "+"
+    If mTargetIndex > 0 Then
+        crosshairGlyph = "X"
+    Else
+        crosshairGlyph = "+"
+    End If
+
+    Mid$(lines(centerRow), centerCol, 1) = crosshairGlyph
 End Sub
 
 Private Function JoinLines(ByRef lines() As String) As String
@@ -502,7 +546,7 @@ Private Function BuildMapText() As String
     Dim playerMapX As Long
     Dim playerMapY As Long
 
-    BuildMapText = "MAP" & vbLf
+    BuildMapText = "MAP  Facing " & GetFacingGlyph() & "  Enemies " & CStr(ActiveEnemyCount()) & vbLf
     playerMapX = Int(mPlayerX)
     playerMapY = Int(mPlayerY)
 
@@ -531,7 +575,8 @@ Private Function BuildMapText() As String
     BuildMapText = BuildMapText & "W/S or Up/Down  Move" & vbLf
     BuildMapText = BuildMapText & "A/D or Left/Right Turn" & vbLf
     BuildMapText = BuildMapText & "Q/E Strafe" & vbLf
-    BuildMapText = BuildMapText & "Space Shoot"
+    BuildMapText = BuildMapText & "Space Shoot" & vbLf
+    BuildMapText = BuildMapText & "P Pause  R Reset"
 End Function
 
 Private Function IsEnemyOnTile(ByVal mapX As Long, ByVal mapY As Long) As Boolean
@@ -548,7 +593,9 @@ Private Function IsEnemyOnTile(ByVal mapX As Long, ByVal mapY As Long) As Boolea
 End Function
 
 Private Function BuildHudText() As String
-    BuildHudText = "HP " & Format$(mHealth, "000") & "   AMMO " & Format$(mAmmo, "00") & "   KILLS " & mKills & "/" & ENEMY_COUNT & vbLf & mLastMessage
+    BuildHudText = "HP " & Format$(mHealth, "000") & "   AMMO " & Format$(mAmmo, "00") & "   KILLS " & mKills & "/" & ENEMY_COUNT & "   " & BuildStateText() & vbLf
+    BuildHudText = BuildHudText & BuildTargetText() & vbLf
+    BuildHudText = BuildHudText & mLastMessage
 End Function
 
 Private Function GetSkyGlyph(ByVal rowIndex As Long) As String
@@ -724,18 +771,24 @@ Private Sub InitializeMap()
 End Sub
 
 Private Sub InitializeEnemies()
-    SetEnemy 1, 6.5, 2.5, 2
-    SetEnemy 2, 10.5, 6.5, 2
-    SetEnemy 3, 13.5, 9.5, 2
-    SetEnemy 4, 14.5, 13.5, 2
-    SetEnemy 5, 8.5, 15.5, 3
-    SetEnemy 6, 4.5, 14.5, 2
+    SetEnemy 1, 6.5, 2.5, ENEMY_GRUNT
+    SetEnemy 2, 10.5, 6.5, ENEMY_STALKER
+    SetEnemy 3, 13.5, 9.5, ENEMY_GRUNT
+    SetEnemy 4, 14.5, 13.5, ENEMY_STALKER
+    SetEnemy 5, 8.5, 15.5, ENEMY_BRUTE
+    SetEnemy 6, 4.5, 14.5, ENEMY_GRUNT
 End Sub
 
-Private Sub SetEnemy(ByVal enemyIndex As Long, ByVal posX As Double, ByVal posY As Double, ByVal hp As Long)
+Private Sub SetEnemy(ByVal enemyIndex As Long, ByVal posX As Double, ByVal posY As Double, ByVal enemyKind As Long)
     mEnemies(enemyIndex).X = posX
     mEnemies(enemyIndex).Y = posY
-    mEnemies(enemyIndex).Health = hp
+    mEnemies(enemyIndex).Kind = enemyKind
+    mEnemies(enemyIndex).MaxHealth = GetEnemyMaxHealth(enemyKind)
+    mEnemies(enemyIndex).Health = mEnemies(enemyIndex).MaxHealth
+    mEnemies(enemyIndex).Speed = GetEnemySpeed(enemyKind)
+    mEnemies(enemyIndex).AttackRange = GetEnemyAttackRange(enemyKind)
+    mEnemies(enemyIndex).AttackDamage = GetEnemyAttackDamage(enemyKind)
+    mEnemies(enemyIndex).CooldownMax = GetEnemyCooldown(enemyKind)
     mEnemies(enemyIndex).Cooldown = 0
     mEnemies(enemyIndex).Alive = True
 End Sub
@@ -753,12 +806,13 @@ Private Sub SetupSheet()
 
     EnsureTextBox ws, SHAPE_TITLE, 16, 10, 860, 28, "EXCEL DOOM", 18, RGB(255, 214, 168), True, RGB(24, 16, 16)
     EnsureTextBox ws, SHAPE_VIEWPORT, 16, 44, 860, 540, "", 8.5, RGB(255, 236, 210), False, RGB(8, 8, 8)
-    EnsureTextBox ws, SHAPE_HUD, 16, 592, 860, 48, "", 11, RGB(255, 214, 168), False, RGB(24, 16, 16)
+    EnsureTextBox ws, SHAPE_HUD, 16, 592, 860, 72, "", 11, RGB(255, 214, 168), False, RGB(24, 16, 16)
     EnsureTextBox ws, SHAPE_MAP, 896, 44, 250, 596, "", 9, RGB(226, 226, 226), False, RGB(12, 12, 12)
 
     EnsureButton ws, "doom_start", 896, 10, 76, 24, "START", "ExcelDoom_StartGame"
     EnsureButton ws, "doom_reset", 980, 10, 76, 24, "RESET", "ExcelDoom_ResetGame"
-    EnsureButton ws, "doom_stop", 1064, 10, 76, 24, "STOP", "ExcelDoom_StopGame"
+    EnsureButton ws, "doom_pause", 1064, 10, 76, 24, "PAUSE", "ExcelDoom_TogglePause"
+    EnsureButton ws, "doom_stop", 1148, 10, 76, 24, "STOP", "ExcelDoom_StopGame"
 End Sub
 
 Private Sub ShowIdleScreen()
@@ -772,7 +826,8 @@ Private Sub ShowIdleScreen()
     idleText = idleText & "  |______|\_____|\_____||_|  |_|" & vbLf & vbLf
     idleText = idleText & "  Faster ASCII renderer loaded." & vbLf
     idleText = idleText & "  Higher resolution: 120x40." & vbLf
-    idleText = idleText & "  Real enemies chase and shoot back." & vbLf & vbLf
+    idleText = idleText & "  Real enemies chase and shoot back." & vbLf
+    idleText = idleText & "  P pauses, R restarts, X crosshair means target lock." & vbLf & vbLf
     idleText = idleText & "  Press START or run ExcelDoom_StartGame."
 
     SetViewportText idleText
@@ -877,6 +932,137 @@ Private Sub SetMapText(ByVal textValue As String)
     GetGameSheet.Shapes(SHAPE_MAP).TextFrame2.TextRange.Text = textValue
 End Sub
 
+Private Function BuildStateText() As String
+    If Not mStarted Then
+        BuildStateText = "STATE STOP"
+    ElseIf mPaused Then
+        BuildStateText = "STATE PAUSE"
+    ElseIf mHealth <= 25 Then
+        BuildStateText = "STATE CRITICAL"
+    Else
+        BuildStateText = "STATE COMBAT"
+    End If
+End Function
+
+Private Function BuildTargetText() As String
+    If mTargetIndex > 0 Then
+        BuildTargetText = "TARGET " & GetEnemyName(mEnemies(mTargetIndex).Kind) & "  HP " & mEnemies(mTargetIndex).Health & "/" & mEnemies(mTargetIndex).MaxHealth & "  PRESS SPACE"
+    ElseIf mPaused Then
+        BuildTargetText = "PAUSED  Press P to resume or R to restart"
+    Else
+        BuildTargetText = "TARGET NONE  Use minimap, keep enemy near center, X means target lock"
+    End If
+End Function
+
+Private Function GetFacingGlyph() As String
+    Dim facing As Double
+
+    facing = NormalizeAngle(mPlayerAngle)
+
+    If facing < PI / 4# Or facing >= (7# * PI / 4#) Then
+        GetFacingGlyph = ">"
+    ElseIf facing < (3# * PI / 4#) Then
+        GetFacingGlyph = "v"
+    ElseIf facing < (5# * PI / 4#) Then
+        GetFacingGlyph = "<"
+    Else
+        GetFacingGlyph = "^"
+    End If
+End Function
+
+Private Function GetEnemyGlyph(ByVal enemyIndex As Long) As String
+    Select Case mEnemies(enemyIndex).Kind
+        Case ENEMY_STALKER
+            If mEnemies(enemyIndex).Health = 1 Then
+                GetEnemyGlyph = "r"
+            Else
+                GetEnemyGlyph = "R"
+            End If
+        Case ENEMY_BRUTE
+            If mEnemies(enemyIndex).Health <= 2 Then
+                GetEnemyGlyph = "h"
+            Else
+                GetEnemyGlyph = "H"
+            End If
+        Case Else
+            If mEnemies(enemyIndex).Health = 1 Then
+                GetEnemyGlyph = "m"
+            Else
+                GetEnemyGlyph = "M"
+            End If
+    End Select
+
+    If enemyIndex = mTargetIndex Then
+        GetEnemyGlyph = UCase$(GetEnemyGlyph)
+    End If
+End Function
+
+Private Function GetEnemyName(ByVal enemyKind As Long) As String
+    Select Case enemyKind
+        Case ENEMY_STALKER
+            GetEnemyName = "STALKER"
+        Case ENEMY_BRUTE
+            GetEnemyName = "BRUTE"
+        Case Else
+            GetEnemyName = "GRUNT"
+    End Select
+End Function
+
+Private Function GetEnemyMaxHealth(ByVal enemyKind As Long) As Long
+    Select Case enemyKind
+        Case ENEMY_STALKER
+            GetEnemyMaxHealth = 2
+        Case ENEMY_BRUTE
+            GetEnemyMaxHealth = 4
+        Case Else
+            GetEnemyMaxHealth = 2
+    End Select
+End Function
+
+Private Function GetEnemySpeed(ByVal enemyKind As Long) As Double
+    Select Case enemyKind
+        Case ENEMY_STALKER
+            GetEnemySpeed = 0.16
+        Case ENEMY_BRUTE
+            GetEnemySpeed = 0.08
+        Case Else
+            GetEnemySpeed = 0.12
+    End Select
+End Function
+
+Private Function GetEnemyAttackRange(ByVal enemyKind As Long) As Double
+    Select Case enemyKind
+        Case ENEMY_STALKER
+            GetEnemyAttackRange = 4.8
+        Case ENEMY_BRUTE
+            GetEnemyAttackRange = 2.2
+        Case Else
+            GetEnemyAttackRange = 6#
+    End Select
+End Function
+
+Private Function GetEnemyAttackDamage(ByVal enemyKind As Long) As Long
+    Select Case enemyKind
+        Case ENEMY_STALKER
+            GetEnemyAttackDamage = 7
+        Case ENEMY_BRUTE
+            GetEnemyAttackDamage = 14
+        Case Else
+            GetEnemyAttackDamage = 6
+    End Select
+End Function
+
+Private Function GetEnemyCooldown(ByVal enemyKind As Long) As Long
+    Select Case enemyKind
+        Case ENEMY_STALKER
+            GetEnemyCooldown = 1
+        Case ENEMY_BRUTE
+            GetEnemyCooldown = 3
+        Case Else
+            GetEnemyCooldown = 2
+    End Select
+End Function
+
 Private Sub BindKeys()
     Application.OnKey "{UP}", "ExcelDoom_MoveForward"
     Application.OnKey "{DOWN}", "ExcelDoom_MoveBackward"
@@ -888,6 +1074,8 @@ Private Sub BindKeys()
     Application.OnKey "d", "ExcelDoom_TurnRight"
     Application.OnKey "q", "ExcelDoom_StrafeLeft"
     Application.OnKey "e", "ExcelDoom_StrafeRight"
+    Application.OnKey "p", "ExcelDoom_TogglePause"
+    Application.OnKey "r", "ExcelDoom_ResetGame"
     Application.OnKey " ", "ExcelDoom_Shoot"
     mKeysBound = True
 End Sub
@@ -905,6 +1093,8 @@ Private Sub UnbindKeys()
     Application.OnKey "d"
     Application.OnKey "q"
     Application.OnKey "e"
+    Application.OnKey "p"
+    Application.OnKey "r"
     Application.OnKey " "
     mKeysBound = False
 End Sub
