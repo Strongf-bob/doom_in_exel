@@ -2,25 +2,28 @@ Attribute VB_Name = "modExcelDoom"
 Option Explicit
 
 Private Const PI As Double = 3.14159265358979
-Private Const MAP_WIDTH As Long = 16
-Private Const MAP_HEIGHT As Long = 16
-Private Const VIEW_WIDTH As Long = 48
-Private Const VIEW_HEIGHT As Long = 24
-Private Const VIEW_ROW As Long = 2
-Private Const VIEW_COL As Long = 2
-Private Const MAP_ROW As Long = 2
-Private Const MAP_COL As Long = 55
+Private Const MAP_WIDTH As Long = 18
+Private Const MAP_HEIGHT As Long = 18
+Private Const VIEW_WIDTH As Long = 120
+Private Const VIEW_HEIGHT As Long = 40
 Private Const FOV As Double = PI / 3#
-Private Const MAX_DEPTH As Double = 20#
-Private Const MOVE_STEP As Double = 0.3
-Private Const STRAFE_STEP As Double = 0.22
-Private Const TURN_STEP As Double = 0.18
+Private Const MAX_DEPTH As Double = 24#
+Private Const MOVE_STEP As Double = 0.32
+Private Const STRAFE_STEP As Double = 0.24
+Private Const TURN_STEP As Double = 0.17
 Private Const PLAYER_RADIUS As Double = 0.16
-Private Const ENEMY_COUNT As Long = 4
+Private Const ENEMY_COUNT As Long = 6
+Private Const UI_SHEET As String = "DOOM"
+Private Const SHAPE_VIEWPORT As String = "doom_viewport"
+Private Const SHAPE_TITLE As String = "doom_title"
+Private Const SHAPE_HUD As String = "doom_hud"
+Private Const SHAPE_MAP As String = "doom_map"
 
 Private Type EnemyState
     X As Double
     Y As Double
+    Health As Long
+    Cooldown As Long
     Alive As Boolean
 End Type
 
@@ -34,30 +37,29 @@ Private mHealth As Long
 Private mKills As Long
 Private mStarted As Boolean
 Private mKeysBound As Boolean
-Private mMuzzleFlash As Boolean
+Private mMuzzleFlashTicks As Long
+Private mLastMessage As String
 Private mWallDistances(1 To VIEW_WIDTH) As Double
 
 Public Sub ExcelDoom_ConfigureSheet()
-    SetupSheet GetGameSheet()
+    SetupSheet
     ShowIdleScreen
 End Sub
 
 Public Sub ExcelDoom_StartGame()
-    Dim ws As Worksheet
-
-    Set ws = GetGameSheet()
     InitializeMap
     InitializeEnemies
-    SetupSheet ws
+    SetupSheet
 
     mPlayerX = 2.5
     mPlayerY = 2.5
     mPlayerAngle = 0#
-    mAmmo = 18
+    mAmmo = 36
     mHealth = 100
     mKills = 0
-    mMuzzleFlash = False
     mStarted = True
+    mMuzzleFlashTicks = 0
+    mLastMessage = "Очисти уровень и не дай демонам подойти вплотную."
 
     BindKeys
     RenderFrame
@@ -69,10 +71,11 @@ End Sub
 
 Public Sub ExcelDoom_StopGame()
     mStarted = False
-    mMuzzleFlash = False
+    mMuzzleFlashTicks = 0
     UnbindKeys
+    SetupSheet
     ShowIdleScreen
-    RenderHud GetGameSheet(), "Остановлено. Запусти ExcelDoom_StartGame, чтобы вернуться в бой."
+    SetHudText "Остановлено. Нажми START или запусти ExcelDoom_StartGame."
 End Sub
 
 Public Sub ExcelDoom_MoveForward()
@@ -116,33 +119,45 @@ Public Sub ExcelDoom_Shoot()
 
     If Not EnsureRunning() Then Exit Sub
     If mAmmo <= 0 Then
-        RenderHud GetGameSheet(), "Патроны закончились. Нажми RESET."
+        mLastMessage = "Патроны закончились. Нажми RESET."
+        RenderFrame
         Exit Sub
     End If
 
     mAmmo = mAmmo - 1
-    mMuzzleFlash = True
+    mMuzzleFlashTicks = 1
     hitIndex = FindShootTarget()
 
     If hitIndex > 0 Then
-        mEnemies(hitIndex).Alive = False
-        mKills = mKills + 1
+        mEnemies(hitIndex).Health = mEnemies(hitIndex).Health - 1
+        If mEnemies(hitIndex).Health <= 0 Then
+            mEnemies(hitIndex).Alive = False
+            mKills = mKills + 1
+            mLastMessage = "Демон убит. Осталось: " & CStr(ActiveEnemyCount())
+        Else
+            mLastMessage = "Попадание. Добей его."
+        End If
+    Else
+        mLastMessage = "Мимо. Держи врага на прицеле."
     End If
 
     StepSimulation
-    mMuzzleFlash = False
 End Sub
 
 Private Function EnsureRunning() As Boolean
     If mStarted Then
         EnsureRunning = True
     Else
-        RenderHud GetGameSheet(), "Игра не запущена. Запусти ExcelDoom_StartGame."
+        SetHudText "Игра не запущена. Нажми START или запусти ExcelDoom_StartGame."
     End If
 End Function
 
 Private Sub StepSimulation()
-    ApplyEnemyPressure
+    MoveEnemies
+    ApplyEnemyAttacks
+    If mMuzzleFlashTicks > 0 Then
+        mMuzzleFlashTicks = mMuzzleFlashTicks - 1
+    End If
     RenderFrame
 End Sub
 
@@ -169,38 +184,100 @@ Private Function CanOccupy(ByVal x As Double, ByVal y As Double) As Boolean
         And Not IsWallAt(x + PLAYER_RADIUS, y + PLAYER_RADIUS)
 End Function
 
-Private Sub ApplyEnemyPressure()
+Private Sub MoveEnemies()
     Dim i As Long
-    Dim aliveCount As Long
-
-    aliveCount = 0
+    Dim distanceToPlayer As Double
+    Dim dirX As Double
+    Dim dirY As Double
+    Dim moveX As Double
+    Dim moveY As Double
+    Dim nextX As Double
+    Dim nextY As Double
 
     For i = 1 To ENEMY_COUNT
         If mEnemies(i).Alive Then
-            aliveCount = aliveCount + 1
-            If Distance(mPlayerX, mPlayerY, mEnemies(i).X, mEnemies(i).Y) < 1.5 Then
-                If HasLineOfSight(mEnemies(i).X, mEnemies(i).Y) Then
-                    mHealth = mHealth - 6
+            distanceToPlayer = Distance(mEnemies(i).X, mEnemies(i).Y, mPlayerX, mPlayerY)
+            If distanceToPlayer > 1.2 Then
+                dirX = (mPlayerX - mEnemies(i).X) / distanceToPlayer
+                dirY = (mPlayerY - mEnemies(i).Y) / distanceToPlayer
+                moveX = dirX * 0.12
+                moveY = dirY * 0.12
+                nextX = mEnemies(i).X + moveX
+                nextY = mEnemies(i).Y + moveY
+
+                If EnemyCanOccupy(i, nextX, mEnemies(i).Y) Then
+                    mEnemies(i).X = nextX
+                End If
+
+                If EnemyCanOccupy(i, mEnemies(i).X, nextY) Then
+                    mEnemies(i).Y = nextY
+                End If
+            End If
+
+            If mEnemies(i).Cooldown > 0 Then
+                mEnemies(i).Cooldown = mEnemies(i).Cooldown - 1
+            End If
+        End If
+    Next i
+End Sub
+
+Private Function EnemyCanOccupy(ByVal enemyIndex As Long, ByVal x As Double, ByVal y As Double) As Boolean
+    Dim i As Long
+
+    If IsWallAt(x, y) Then Exit Function
+
+    For i = 1 To ENEMY_COUNT
+        If i <> enemyIndex Then
+            If mEnemies(i).Alive Then
+                If Distance(x, y, mEnemies(i).X, mEnemies(i).Y) < 0.45 Then Exit Function
+            End If
+        End If
+    Next i
+
+    EnemyCanOccupy = True
+End Function
+
+Private Sub ApplyEnemyAttacks()
+    Dim i As Long
+    Dim pressure As Long
+    Dim distanceToPlayer As Double
+
+    pressure = 0
+
+    For i = 1 To ENEMY_COUNT
+        If mEnemies(i).Alive Then
+            distanceToPlayer = Distance(mEnemies(i).X, mEnemies(i).Y, mPlayerX, mPlayerY)
+            If distanceToPlayer < 5.2 And HasLineOfSight(mEnemies(i).X, mEnemies(i).Y) Then
+                If mEnemies(i).Cooldown = 0 Then
+                    pressure = pressure + 1
+                    mEnemies(i).Cooldown = 2
                 End If
             End If
         End If
     Next i
 
+    If pressure > 0 Then
+        mHealth = mHealth - (pressure * 7)
+        If mHealth < 0 Then mHealth = 0
+        mLastMessage = "Тебя обстреливают. Меняй позицию."
+    End If
+
     If mHealth <= 0 Then
-        mHealth = 0
         mStarted = False
         UnbindKeys
-    ElseIf aliveCount = 0 Then
+        mLastMessage = "GAME OVER. Нажми RESET."
+    ElseIf ActiveEnemyCount() = 0 Then
         mStarted = False
         UnbindKeys
+        mLastMessage = "VICTORY. Все демоны уничтожены."
     End If
 End Sub
 
 Private Function FindShootTarget() As Long
     Dim i As Long
-    Dim bestDistance As Double
     Dim enemyDistance As Double
     Dim enemyAngle As Double
+    Dim bestDistance As Double
 
     bestDistance = 1E+30
 
@@ -209,7 +286,7 @@ Private Function FindShootTarget() As Long
             enemyDistance = Distance(mPlayerX, mPlayerY, mEnemies(i).X, mEnemies(i).Y)
             enemyAngle = NormalizeRelativeAngle(Atan2(mEnemies(i).Y - mPlayerY, mEnemies(i).X - mPlayerX) - mPlayerAngle)
 
-            If Abs(enemyAngle) <= 0.12 And enemyDistance < bestDistance Then
+            If Abs(enemyAngle) <= 0.07 And enemyDistance < bestDistance Then
                 If HasLineOfSight(mEnemies(i).X, mEnemies(i).Y) Then
                     bestDistance = enemyDistance
                     FindShootTarget = i
@@ -220,7 +297,7 @@ Private Function FindShootTarget() As Long
 End Function
 
 Private Function HasLineOfSight(ByVal targetX As Double, ByVal targetY As Double) As Boolean
-    Dim i As Long
+    Dim stepIndex As Long
     Dim steps As Long
     Dim sampleX As Double
     Dim sampleY As Double
@@ -228,269 +305,296 @@ Private Function HasLineOfSight(ByVal targetX As Double, ByVal targetY As Double
     steps = CLng(Distance(mPlayerX, mPlayerY, targetX, targetY) / 0.05)
     If steps < 1 Then steps = 1
 
-    For i = 1 To steps - 1
-        sampleX = mPlayerX + (targetX - mPlayerX) * (i / steps)
-        sampleY = mPlayerY + (targetY - mPlayerY) * (i / steps)
+    For stepIndex = 1 To steps - 1
+        sampleX = mPlayerX + (targetX - mPlayerX) * (stepIndex / steps)
+        sampleY = mPlayerY + (targetY - mPlayerY) * (stepIndex / steps)
         If IsWallAt(sampleX, sampleY) Then Exit Function
-    Next i
+    Next stepIndex
 
     HasLineOfSight = True
 End Function
 
 Private Sub RenderFrame()
-    Dim ws As Worksheet
-    Dim col As Long
-    Dim row As Long
+    Dim lines(1 To VIEW_HEIGHT) As String
+    Dim rowIndex As Long
+    Dim colIndex As Long
     Dim distanceToWall As Double
     Dim hitTile As String
     Dim hitSide As Long
-    Dim wallHeight As Long
     Dim ceilingRow As Long
     Dim floorRow As Long
-    Dim wallColorValue As Long
-    Dim statusText As String
+    Dim wallGlyph As String
 
-    Set ws = GetGameSheet()
-    RenderBackground ws
+    For rowIndex = 1 To VIEW_HEIGHT
+        lines(rowIndex) = String$(VIEW_WIDTH, " ")
+    Next rowIndex
 
-    For col = 1 To VIEW_WIDTH
-        CastRay col, distanceToWall, hitTile, hitSide
-        mWallDistances(col) = distanceToWall
-        wallHeight = CLng((VIEW_HEIGHT * 0.8) / MaxDouble(0.2, distanceToWall))
-        If wallHeight > VIEW_HEIGHT Then wallHeight = VIEW_HEIGHT
+    For colIndex = 1 To VIEW_WIDTH
+        CastRay colIndex, distanceToWall, hitTile, hitSide
+        mWallDistances(colIndex) = distanceToWall
 
-        ceilingRow = (VIEW_HEIGHT - wallHeight) \ 2
-        floorRow = ceilingRow + wallHeight
-        wallColorValue = GetWallColor(hitTile, distanceToWall, hitSide)
+        ceilingRow = (VIEW_HEIGHT \ 2) - CLng((VIEW_HEIGHT * 0.8) / MaxDouble(0.25, distanceToWall))
+        floorRow = VIEW_HEIGHT - ceilingRow
 
-        For row = ceilingRow + 1 To floorRow
-            PaintCell ws, VIEW_ROW + row - 1, VIEW_COL + col - 1, wallColorValue, " "
-        Next row
-    Next col
+        If ceilingRow < 1 Then ceilingRow = 1
+        If floorRow > VIEW_HEIGHT Then floorRow = VIEW_HEIGHT
+        wallGlyph = GetWallGlyph(hitTile, distanceToWall, hitSide)
 
-    RenderEnemies ws
-    RenderWeapon ws
-    RenderCrosshair ws
-    RenderMinimap ws
+        For rowIndex = 1 To ceilingRow - 1
+            Mid$(lines(rowIndex), colIndex, 1) = GetSkyGlyph(rowIndex)
+        Next rowIndex
 
-    If mStarted Then
-        statusText = "WASD/стрелки: ходьба и поворот, Q/E: шаг вбок, SPACE: выстрел."
-    ElseIf mHealth = 0 Then
-        statusText = "GAME OVER. Нажми RESET."
-    Else
-        statusText = "VICTORY. Все демоны уничтожены. Нажми RESET."
-    End If
+        For rowIndex = ceilingRow To floorRow
+            Mid$(lines(rowIndex), colIndex, 1) = wallGlyph
+        Next rowIndex
 
-    RenderHud ws, statusText
+        For rowIndex = floorRow + 1 To VIEW_HEIGHT
+            Mid$(lines(rowIndex), colIndex, 1) = GetFloorGlyph(rowIndex, distanceToWall)
+        Next rowIndex
+    Next colIndex
+
+    RenderEnemiesInto lines
+    RenderWeaponInto lines
+    RenderCrosshairInto lines
+
+    SetViewportText JoinLines(lines)
+    SetMapText BuildMapText()
+    SetHudText BuildHudText()
 End Sub
 
-Private Sub RenderBackground(ByVal ws As Worksheet)
-    Dim row As Long
-    Dim col As Long
-    Dim colorValue As Long
-
-    For row = 1 To VIEW_HEIGHT
-        If row <= VIEW_HEIGHT \ 2 Then
-            colorValue = RGB(55, 12, 10)
-        Else
-            colorValue = RGB(28, 24, 24)
-        End If
-
-        For col = 1 To VIEW_WIDTH
-            PaintCell ws, VIEW_ROW + row - 1, VIEW_COL + col - 1, colorValue, " "
-        Next col
-    Next row
-End Sub
-
-Private Sub RenderEnemies(ByVal ws As Worksheet)
+Private Sub RenderEnemiesInto(ByRef lines() As String)
+    Dim drawOrder(1 To ENEMY_COUNT) As Long
+    Dim visibleCount As Long
     Dim i As Long
+    Dim orderIndex As Long
+    Dim chosenIndex As Long
+    Dim farthestDistance As Double
+    Dim currentDistance As Double
     Dim relAngle As Double
     Dim enemyDistance As Double
     Dim screenX As Long
-    Dim sizeCells As Long
-    Dim drawX As Long
-    Dim drawY As Long
+    Dim spriteHeight As Long
+    Dim spriteWidth As Long
     Dim topRow As Long
     Dim leftCol As Long
+    Dim drawRow As Long
+    Dim drawCol As Long
     Dim targetColumn As Long
+    Dim glyph As String
 
-    For i = 1 To ENEMY_COUNT
-        If mEnemies(i).Alive Then
-            enemyDistance = Distance(mPlayerX, mPlayerY, mEnemies(i).X, mEnemies(i).Y)
-            relAngle = NormalizeRelativeAngle(Atan2(mEnemies(i).Y - mPlayerY, mEnemies(i).X - mPlayerX) - mPlayerAngle)
+    For orderIndex = 1 To ENEMY_COUNT
+        farthestDistance = -1#
+        chosenIndex = 0
 
-            If Abs(relAngle) <= (FOV / 2#) + 0.1 Then
-                screenX = CLng((VIEW_WIDTH / 2#) + ((relAngle / (FOV / 2#)) * (VIEW_WIDTH / 2#)))
-                If screenX < 1 Then screenX = 1
-                If screenX > VIEW_WIDTH Then screenX = VIEW_WIDTH
-
-                targetColumn = screenX
-                If enemyDistance < mWallDistances(targetColumn) Then
-                    sizeCells = CLng(8# / MaxDouble(0.6, enemyDistance))
-                    If sizeCells < 1 Then sizeCells = 1
-                    If sizeCells > 6 Then sizeCells = 6
-
-                    topRow = VIEW_ROW + (VIEW_HEIGHT \ 2) - sizeCells
-                    leftCol = VIEW_COL + screenX - (sizeCells \ 2)
-
-                    For drawY = 0 To sizeCells
-                        For drawX = 0 To sizeCells
-                            If topRow + drawY >= VIEW_ROW And topRow + drawY < VIEW_ROW + VIEW_HEIGHT Then
-                                If leftCol + drawX >= VIEW_COL And leftCol + drawX < VIEW_COL + VIEW_WIDTH Then
-                                    PaintCell ws, topRow + drawY, leftCol + drawX, RGB(220, 88, 0), " "
-                                End If
-                            End If
-                        Next drawX
-                    Next drawY
+        For i = 1 To ENEMY_COUNT
+            If mEnemies(i).Alive Then
+                If Not EnemyAlreadyQueued(drawOrder, visibleCount, i) Then
+                    currentDistance = Distance(mEnemies(i).X, mEnemies(i).Y, mPlayerX, mPlayerY)
+                    If currentDistance > farthestDistance Then
+                        farthestDistance = currentDistance
+                        chosenIndex = i
+                    End If
                 End If
             End If
+        Next i
+
+        If chosenIndex > 0 Then
+            visibleCount = visibleCount + 1
+            drawOrder(visibleCount) = chosenIndex
+        End If
+    Next orderIndex
+
+    For orderIndex = 1 To visibleCount
+        i = drawOrder(orderIndex)
+        enemyDistance = Distance(mEnemies(i).X, mEnemies(i).Y, mPlayerX, mPlayerY)
+        relAngle = NormalizeRelativeAngle(Atan2(mEnemies(i).Y - mPlayerY, mEnemies(i).X - mPlayerX) - mPlayerAngle)
+
+        If Abs(relAngle) <= (FOV / 2#) + 0.12 Then
+            screenX = CLng((VIEW_WIDTH / 2#) + ((relAngle / (FOV / 2#)) * (VIEW_WIDTH / 2#)))
+            If screenX < 1 Then screenX = 1
+            If screenX > VIEW_WIDTH Then screenX = VIEW_WIDTH
+
+            targetColumn = screenX
+            If enemyDistance < mWallDistances(targetColumn) Then
+                spriteHeight = CLng((VIEW_HEIGHT * 0.9) / MaxDouble(0.5, enemyDistance))
+                spriteWidth = spriteHeight \ 2
+                If spriteHeight < 2 Then spriteHeight = 2
+                If spriteHeight > 16 Then spriteHeight = 16
+                If spriteWidth < 1 Then spriteWidth = 1
+                If spriteWidth > 7 Then spriteWidth = 7
+
+                topRow = (VIEW_HEIGHT \ 2) - (spriteHeight \ 2)
+                leftCol = screenX - (spriteWidth \ 2)
+                glyph = IIf(mEnemies(i).Health = 1, "8", "M")
+
+                For drawRow = 0 To spriteHeight - 1
+                    For drawCol = 0 To spriteWidth - 1
+                        If topRow + drawRow >= 1 And topRow + drawRow <= VIEW_HEIGHT Then
+                            If leftCol + drawCol >= 1 And leftCol + drawCol <= VIEW_WIDTH Then
+                                Mid$(lines(topRow + drawRow), leftCol + drawCol, 1) = glyph
+                            End If
+                        End If
+                    Next drawCol
+                Next drawRow
+            End If
+        End If
+    Next orderIndex
+End Sub
+
+Private Function EnemyAlreadyQueued(ByRef drawOrder() As Long, ByVal queuedCount As Long, ByVal enemyIndex As Long) As Boolean
+    Dim i As Long
+
+    For i = 1 To queuedCount
+        If drawOrder(i) = enemyIndex Then
+            EnemyAlreadyQueued = True
+            Exit Function
         End If
     Next i
-End Sub
+End Function
 
-Private Sub RenderWeapon(ByVal ws As Worksheet)
-    Dim row As Long
-    Dim col As Long
+Private Sub RenderWeaponInto(ByRef lines() As String)
     Dim baseRow As Long
     Dim baseCol As Long
-    Dim colorValue As Long
+    Dim flashGlyph As String
 
-    baseRow = VIEW_ROW + VIEW_HEIGHT - 4
-    baseCol = VIEW_COL + (VIEW_WIDTH \ 2) - 2
+    baseRow = VIEW_HEIGHT - 4
+    baseCol = (VIEW_WIDTH \ 2) - 4
 
-    For row = 0 To 2
-        For col = 0 To 4
-            colorValue = RGB(95, 95, 95)
-            If mMuzzleFlash And row = 0 And col >= 1 And col <= 3 Then
-                colorValue = RGB(255, 180, 0)
-            End If
-            PaintCell ws, baseRow + row, baseCol + col, colorValue, " "
-        Next col
-    Next row
+    Mid$(lines(baseRow), baseCol + 2, 3) = "\|/"
+    Mid$(lines(baseRow + 1), baseCol + 1, 5) = "[###]"
+    Mid$(lines(baseRow + 2), baseCol + 1, 5) = "/###\"
+
+    If mMuzzleFlashTicks > 0 Then
+        flashGlyph = "*"
+        Mid$(lines(baseRow - 1), baseCol + 3, 1) = flashGlyph
+        Mid$(lines(baseRow), baseCol + 3, 1) = flashGlyph
+    End If
 End Sub
 
-Private Sub RenderCrosshair(ByVal ws As Worksheet)
+Private Sub RenderCrosshairInto(ByRef lines() As String)
     Dim centerRow As Long
     Dim centerCol As Long
 
-    centerRow = VIEW_ROW + (VIEW_HEIGHT \ 2) - 1
-    centerCol = VIEW_COL + (VIEW_WIDTH \ 2) - 1
+    centerRow = VIEW_HEIGHT \ 2
+    centerCol = VIEW_WIDTH \ 2
 
-    PaintCell ws, centerRow, centerCol, RGB(255, 244, 214), "+"
+    Mid$(lines(centerRow), centerCol, 1) = "+"
 End Sub
 
-Private Sub RenderMinimap(ByVal ws As Worksheet)
-    Dim mapX As Long
-    Dim mapY As Long
-    Dim cellColor As Long
-    Dim playerCellX As Long
-    Dim playerCellY As Long
-    Dim enemyCellX As Long
-    Dim enemyCellY As Long
-    Dim i As Long
+Private Function JoinLines(ByRef lines() As String) As String
+    Dim rowIndex As Long
 
-    ws.Cells(MAP_ROW - 1, MAP_COL).Value2 = "MAP"
-    ws.Cells(MAP_ROW - 1, MAP_COL).Font.Bold = True
-    ws.Cells(MAP_ROW - 1, MAP_COL).Font.Color = RGB(255, 214, 168)
-
-    For mapY = 0 To MAP_HEIGHT - 1
-        For mapX = 0 To MAP_WIDTH - 1
-            Select Case TileAt(mapX, mapY)
-                Case "#"
-                    cellColor = RGB(90, 38, 32)
-                Case "X"
-                    cellColor = RGB(160, 36, 36)
-                Case "D"
-                    cellColor = RGB(185, 130, 25)
-                Case Else
-                    cellColor = RGB(18, 18, 18)
-            End Select
-
-            PaintCell ws, MAP_ROW + mapY, MAP_COL + mapX, cellColor, " "
-        Next mapX
-    Next mapY
-
-    playerCellX = Int(mPlayerX)
-    playerCellY = Int(mPlayerY)
-    PaintCell ws, MAP_ROW + playerCellY, MAP_COL + playerCellX, RGB(0, 176, 255), "P"
-
-    For i = 1 To ENEMY_COUNT
-        If mEnemies(i).Alive Then
-            enemyCellX = Int(mEnemies(i).X)
-            enemyCellY = Int(mEnemies(i).Y)
-            PaintCell ws, MAP_ROW + enemyCellY, MAP_COL + enemyCellX, RGB(255, 110, 0), "E"
+    For rowIndex = LBound(lines) To UBound(lines)
+        If rowIndex = LBound(lines) Then
+            JoinLines = lines(rowIndex)
+        Else
+            JoinLines = JoinLines & vbLf & lines(rowIndex)
         End If
-    Next i
-End Sub
+    Next rowIndex
+End Function
 
-Private Sub RenderHud(ByVal ws As Worksheet, ByVal statusText As String)
-    ws.Cells(1, 2).Value2 = "EXCEL DOOM"
-    ws.Cells(1, 2).Font.Bold = True
-    ws.Cells(1, 2).Font.Size = 16
-    ws.Cells(1, 2).Font.Color = RGB(255, 214, 168)
+Private Function BuildMapText() As String
+    Dim mapRow As Long
+    Dim mapCol As Long
+    Dim lineText As String
+    Dim tileValue As String
+    Dim enemyIndex As Long
+    Dim playerMapX As Long
+    Dim playerMapY As Long
 
-    ws.Cells(VIEW_ROW + VIEW_HEIGHT + 1, VIEW_COL).Value2 = "HP " & Format$(mHealth, "000") & "   AMMO " & Format$(mAmmo, "00") & "   KILLS " & mKills & "/" & ENEMY_COUNT
-    ws.Cells(VIEW_ROW + VIEW_HEIGHT + 1, VIEW_COL).Font.Color = RGB(255, 255, 255)
-    ws.Cells(VIEW_ROW + VIEW_HEIGHT + 2, VIEW_COL).Value2 = statusText
-    ws.Cells(VIEW_ROW + VIEW_HEIGHT + 2, VIEW_COL).Font.Color = RGB(255, 214, 168)
+    BuildMapText = "MAP" & vbLf
+    playerMapX = Int(mPlayerX)
+    playerMapY = Int(mPlayerY)
 
-    ws.Cells(20, MAP_COL).Value2 = "Управление"
-    ws.Cells(21, MAP_COL).Value2 = "W / ↑  вперёд"
-    ws.Cells(22, MAP_COL).Value2 = "S / ↓  назад"
-    ws.Cells(23, MAP_COL).Value2 = "A,D / ←,→  поворот"
-    ws.Cells(24, MAP_COL).Value2 = "Q / E  шаг вбок"
-    ws.Cells(25, MAP_COL).Value2 = "SPACE  выстрел"
-    ws.Range(ws.Cells(20, MAP_COL), ws.Cells(25, MAP_COL + 6)).Font.Color = RGB(228, 228, 228)
-End Sub
+    For mapRow = 0 To MAP_HEIGHT - 1
+        lineText = ""
 
-Private Sub ShowIdleScreen()
-    Dim ws As Worksheet
-    Dim row As Long
+        For mapCol = 0 To MAP_WIDTH - 1
+            tileValue = TileAt(mapCol, mapRow)
 
-    Set ws = GetGameSheet()
-    SetupSheet ws
-    RenderBackground ws
+            If mapCol = playerMapX And mapRow = playerMapY Then
+                lineText = lineText & "P"
+            ElseIf IsEnemyOnTile(mapCol, mapRow) Then
+                lineText = lineText & "E"
+            ElseIf tileValue = "." Then
+                lineText = lineText & "."
+            Else
+                lineText = lineText & tileValue
+            End If
+        Next mapCol
 
-    For row = 9 To 14
-        PaintCell ws, row, VIEW_COL + 12, RGB(80, 20, 20), " "
-        PaintCell ws, row, VIEW_COL + 35, RGB(80, 20, 20), " "
-    Next row
+        BuildMapText = BuildMapText & lineText
+        If mapRow < MAP_HEIGHT - 1 Then BuildMapText = BuildMapText & vbLf
+    Next mapRow
 
-    ws.Cells(12, 16).Value2 = "START"
-    ws.Cells(13, 11).Value2 = "Запусти макрос ExcelDoom_StartGame"
-    ws.Cells(14, 13).Value2 = "через Alt+F8"
-    ws.Range(ws.Cells(12, 11), ws.Cells(14, 34)).Font.Color = RGB(255, 214, 168)
-    ws.Range(ws.Cells(12, 11), ws.Cells(14, 34)).Font.Bold = True
-End Sub
+    BuildMapText = BuildMapText & vbLf & vbLf & "Controls" & vbLf
+    BuildMapText = BuildMapText & "W/S or Up/Down  Move" & vbLf
+    BuildMapText = BuildMapText & "A/D or Left/Right Turn" & vbLf
+    BuildMapText = BuildMapText & "Q/E Strafe" & vbLf
+    BuildMapText = BuildMapText & "Space Shoot"
+End Function
 
-Private Sub SetupSheet(ByVal ws As Worksheet)
-    Dim col As Long
-    Dim row As Long
+Private Function IsEnemyOnTile(ByVal mapX As Long, ByVal mapY As Long) As Boolean
+    Dim enemyIndex As Long
 
-    ws.Cells.Clear
-    ws.Activate
-    ActiveWindow.DisplayGridlines = False
+    For enemyIndex = 1 To ENEMY_COUNT
+        If mEnemies(enemyIndex).Alive Then
+            If Int(mEnemies(enemyIndex).X) = mapX And Int(mEnemies(enemyIndex).Y) = mapY Then
+                IsEnemyOnTile = True
+                Exit Function
+            End If
+        End If
+    Next enemyIndex
+End Function
 
-    For col = 1 To VIEW_COL + VIEW_WIDTH + 20
-        ws.Columns(col).ColumnWidth = 2.3
-    Next col
+Private Function BuildHudText() As String
+    BuildHudText = "HP " & Format$(mHealth, "000") & "   AMMO " & Format$(mAmmo, "00") & "   KILLS " & mKills & "/" & ENEMY_COUNT & vbLf & mLastMessage
+End Function
 
-    For row = 1 To VIEW_ROW + VIEW_HEIGHT + 4
-        ws.Rows(row).RowHeight = 15
-    Next row
+Private Function GetSkyGlyph(ByVal rowIndex As Long) As String
+    If rowIndex < VIEW_HEIGHT \ 6 Then
+        GetSkyGlyph = "."
+    Else
+        GetSkyGlyph = " "
+    End If
+End Function
 
-    ws.Range(ws.Cells(1, 1), ws.Cells(40, 90)).Font.Name = "Consolas"
-    ws.Range(ws.Cells(1, 1), ws.Cells(40, 90)).HorizontalAlignment = xlCenter
-    ws.Range(ws.Cells(1, 1), ws.Cells(40, 90)).VerticalAlignment = xlCenter
-End Sub
+Private Function GetFloorGlyph(ByVal rowIndex As Long, ByVal wallDistance As Double) As String
+    Dim blendValue As Double
 
-Private Sub PaintCell(ByVal ws As Worksheet, ByVal targetRow As Long, ByVal targetCol As Long, ByVal colorValue As Long, ByVal cellText As String)
-    With ws.Cells(targetRow, targetCol)
-        .Interior.Color = colorValue
-        .Value2 = cellText
-        .Font.Color = RGB(255, 255, 255)
-    End With
-End Sub
+    blendValue = (rowIndex - (VIEW_HEIGHT \ 2)) / (VIEW_HEIGHT \ 2)
+
+    If blendValue < 0.18 Then
+        GetFloorGlyph = "-"
+    ElseIf blendValue < 0.35 Then
+        GetFloorGlyph = "="
+    ElseIf blendValue < 0.6 Then
+        GetFloorGlyph = "+"
+    ElseIf wallDistance < 4# Then
+        GetFloorGlyph = "#"
+    Else
+        GetFloorGlyph = "."
+    End If
+End Function
+
+Private Function GetWallGlyph(ByVal tileValue As String, ByVal distanceToWall As Double, ByVal sideHit As Long) As String
+    Dim shadeIndex As Long
+    Dim glyphs As String
+
+    If tileValue = "X" Then
+        glyphs = "@%#*+=-."
+    ElseIf tileValue = "D" Then
+        glyphs = "&8#*+=-."
+    Else
+        glyphs = "##*+=-.."
+    End If
+
+    shadeIndex = CLng(distanceToWall * 1.2) + 1 + sideHit
+    If shadeIndex < 1 Then shadeIndex = 1
+    If shadeIndex > Len(glyphs) Then shadeIndex = Len(glyphs)
+
+    GetWallGlyph = Mid$(glyphs, shadeIndex, 1)
+End Function
 
 Private Sub CastRay(ByVal columnIndex As Long, ByRef outDistance As Double, ByRef outTile As String, ByRef outSide As Long)
     Dim rayAngle As Double
@@ -560,26 +664,22 @@ Private Sub CastRay(ByVal columnIndex As Long, ByRef outDistance As Double, ByRe
         outDistance = (mapY - mPlayerY + (1 - stepY) / 2#) / rayDirY
     End If
 
-    If outDistance < 0.1 Then outDistance = 0.1
+    If outDistance < 0.15 Then outDistance = 0.15
     If outDistance > MAX_DEPTH Then outDistance = MAX_DEPTH
 End Sub
 
-Private Function GetWallColor(ByVal tileValue As String, ByVal distanceToWall As Double, ByVal sideHit As Long) As Long
-    Dim shade As Long
+Private Function ActiveEnemyCount() As Long
+    Dim enemyIndex As Long
 
-    shade = 220 - CLng(distanceToWall * 10)
-    If shade < 40 Then shade = 40
-    If sideHit = 1 Then shade = shade - 25
-    If shade < 20 Then shade = 20
+    For enemyIndex = 1 To ENEMY_COUNT
+        If mEnemies(enemyIndex).Alive Then
+            ActiveEnemyCount = ActiveEnemyCount + 1
+        End If
+    Next enemyIndex
+End Function
 
-    Select Case tileValue
-        Case "X"
-            GetWallColor = RGB(shade, 38, 38)
-        Case "D"
-            GetWallColor = RGB(shade, 150, 24)
-        Case Else
-            GetWallColor = RGB(shade, 70, 24)
-    End Select
+Private Function Distance(ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double) As Double
+    Distance = Sqr((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1))
 End Function
 
 Private Function MaxDouble(ByVal leftValue As Double, ByVal rightValue As Double) As Double
@@ -588,10 +688,6 @@ Private Function MaxDouble(ByVal leftValue As Double, ByVal rightValue As Double
     Else
         MaxDouble = rightValue
     End If
-End Function
-
-Private Function Distance(ByVal x1 As Double, ByVal y1 As Double, ByVal x2 As Double, ByVal y2 As Double) As Double
-    Distance = Sqr((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1))
 End Function
 
 Private Function IsWallAt(ByVal x As Double, ByVal y As Double) As Boolean
@@ -607,52 +703,179 @@ Private Function TileAt(ByVal tileX As Long, ByVal tileY As Long) As String
 End Function
 
 Private Sub InitializeMap()
-    mMap(0) = "################"
-    mMap(1) = "#.....#....#..X#"
-    mMap(2) = "#.....#....#...#"
-    mMap(3) = "#..#..#....#...#"
-    mMap(4) = "#..#..####.#...#"
-    mMap(5) = "#..#.........#.#"
-    mMap(6) = "#..#######...#.#"
-    mMap(7) = "#...........##.#"
-    mMap(8) = "#.######......D#"
-    mMap(9) = "#.#....#.......#"
-    mMap(10) = "#.#....#.####..#"
-    mMap(11) = "#.#....#....#..#"
-    mMap(12) = "#...##......#..#"
-    mMap(13) = "#.....#######..#"
-    mMap(14) = "#..............#"
-    mMap(15) = "################"
+    mMap(0) = "##################"
+    mMap(1) = "#....#.......#..X#"
+    mMap(2) = "#....#.......#...#"
+    mMap(3) = "#....#..###..#...#"
+    mMap(4) = "#....#..#....#...#"
+    mMap(5) = "#....#..#....#...#"
+    mMap(6) = "#....####....#...#"
+    mMap(7) = "#...............##"
+    mMap(8) = "#.######........D#"
+    mMap(9) = "#.#....#....###..#"
+    mMap(10) = "#.#....#....#....#"
+    mMap(11) = "#.#....#.##.#....#"
+    mMap(12) = "#.#....#....#....#"
+    mMap(13) = "#...##......#....#"
+    mMap(14) = "#.....#######....#"
+    mMap(15) = "#................#"
+    mMap(16) = "#................#"
+    mMap(17) = "##################"
 End Sub
 
 Private Sub InitializeEnemies()
-    mEnemies(1).X = 6.5
-    mEnemies(1).Y = 2.5
-    mEnemies(1).Alive = True
+    SetEnemy 1, 6.5, 2.5, 2
+    SetEnemy 2, 10.5, 6.5, 2
+    SetEnemy 3, 13.5, 9.5, 2
+    SetEnemy 4, 14.5, 13.5, 2
+    SetEnemy 5, 8.5, 15.5, 3
+    SetEnemy 6, 4.5, 14.5, 2
+End Sub
 
-    mEnemies(2).X = 10.5
-    mEnemies(2).Y = 7.5
-    mEnemies(2).Alive = True
+Private Sub SetEnemy(ByVal enemyIndex As Long, ByVal posX As Double, ByVal posY As Double, ByVal hp As Long)
+    mEnemies(enemyIndex).X = posX
+    mEnemies(enemyIndex).Y = posY
+    mEnemies(enemyIndex).Health = hp
+    mEnemies(enemyIndex).Cooldown = 0
+    mEnemies(enemyIndex).Alive = True
+End Sub
 
-    mEnemies(3).X = 12.5
-    mEnemies(3).Y = 11.5
-    mEnemies(3).Alive = True
+Private Sub SetupSheet()
+    Dim ws As Worksheet
 
-    mEnemies(4).X = 5.5
-    mEnemies(4).Y = 13.5
-    mEnemies(4).Alive = True
+    Set ws = GetGameSheet()
+    ws.Cells.Clear
+    ws.Activate
+    ActiveWindow.DisplayGridlines = False
+
+    ws.Columns("A:Z").ColumnWidth = 2.2
+    ws.Rows("1:45").RowHeight = 15
+
+    EnsureTextBox ws, SHAPE_TITLE, 16, 10, 860, 28, "EXCEL DOOM", 18, RGB(255, 214, 168), True, RGB(24, 16, 16)
+    EnsureTextBox ws, SHAPE_VIEWPORT, 16, 44, 860, 540, "", 8.5, RGB(255, 236, 210), False, RGB(8, 8, 8)
+    EnsureTextBox ws, SHAPE_HUD, 16, 592, 860, 48, "", 11, RGB(255, 214, 168), False, RGB(24, 16, 16)
+    EnsureTextBox ws, SHAPE_MAP, 896, 44, 250, 596, "", 9, RGB(226, 226, 226), False, RGB(12, 12, 12)
+
+    EnsureButton ws, "doom_start", 896, 10, 76, 24, "START", "ExcelDoom_StartGame"
+    EnsureButton ws, "doom_reset", 980, 10, 76, 24, "RESET", "ExcelDoom_ResetGame"
+    EnsureButton ws, "doom_stop", 1064, 10, 76, 24, "STOP", "ExcelDoom_StopGame"
+End Sub
+
+Private Sub ShowIdleScreen()
+    Dim idleText As String
+
+    idleText = "   ______  _____  _____  __  __" & vbLf
+    idleText = idleText & "  |  ____|/ ____|/ ____||  \/  |" & vbLf
+    idleText = idleText & "  | |__  | |    | |     | \  / |" & vbLf
+    idleText = idleText & "  |  __| | |    | |     | |\/| |" & vbLf
+    idleText = idleText & "  | |____| |____| |____ | |  | |" & vbLf
+    idleText = idleText & "  |______|\_____|\_____||_|  |_|" & vbLf & vbLf
+    idleText = idleText & "  Faster ASCII renderer loaded." & vbLf
+    idleText = idleText & "  Higher resolution: 120x40." & vbLf
+    idleText = idleText & "  Real enemies chase and shoot back." & vbLf & vbLf
+    idleText = idleText & "  Press START or run ExcelDoom_StartGame."
+
+    SetViewportText idleText
+    SetMapText "MAP" & vbLf & vbLf & "W/S or Up/Down  Move" & vbLf & "A/D or Left/Right Turn" & vbLf & "Q/E Strafe" & vbLf & "Space Shoot"
+    SetHudText "Готово. Запускай игру."
 End Sub
 
 Private Function GetGameSheet() As Worksheet
     On Error Resume Next
-    Set GetGameSheet = ThisWorkbook.Worksheets("DOOM")
+    Set GetGameSheet = ThisWorkbook.Worksheets(UI_SHEET)
     On Error GoTo 0
 
     If GetGameSheet Is Nothing Then
         Set GetGameSheet = ThisWorkbook.Worksheets.Add
-        GetGameSheet.Name = "DOOM"
+        GetGameSheet.Name = UI_SHEET
     End If
 End Function
+
+Private Sub EnsureTextBox(ByVal ws As Worksheet, ByVal shapeName As String, ByVal leftPos As Double, ByVal topPos As Double, ByVal widthPos As Double, ByVal heightPos As Double, ByVal textValue As String, ByVal fontSize As Double, ByVal fontColor As Long, ByVal isBold As Boolean, ByVal fillColor As Long)
+    Dim shp As Shape
+
+    Set shp = GetOrCreateTextBox(ws, shapeName)
+
+    With shp
+        .Left = leftPos
+        .Top = topPos
+        .Width = widthPos
+        .Height = heightPos
+        .Fill.ForeColor.RGB = fillColor
+        .Line.ForeColor.RGB = RGB(80, 42, 28)
+        .Line.Weight = 1.25
+        .TextFrame2.TextRange.Text = textValue
+        .TextFrame2.TextRange.Font.Name = "Consolas"
+        .TextFrame2.TextRange.Font.Size = fontSize
+        .TextFrame2.TextRange.Font.Fill.ForeColor.RGB = fontColor
+        .TextFrame2.TextRange.Font.Bold = isBold
+        .TextFrame2.MarginLeft = 8
+        .TextFrame2.MarginRight = 8
+        .TextFrame2.MarginTop = 6
+        .TextFrame2.MarginBottom = 6
+        .TextFrame2.WordWrap = msoTrue
+        .Placement = xlFreeFloating
+    End With
+End Sub
+
+Private Sub EnsureButton(ByVal ws As Worksheet, ByVal shapeName As String, ByVal leftPos As Double, ByVal topPos As Double, ByVal widthPos As Double, ByVal heightPos As Double, ByVal labelText As String, ByVal actionName As String)
+    Dim shp As Shape
+
+    Set shp = GetOrCreateShape(ws, shapeName, msoShapeRoundedRectangle)
+
+    With shp
+        .Left = leftPos
+        .Top = topPos
+        .Width = widthPos
+        .Height = heightPos
+        .Fill.ForeColor.RGB = RGB(88, 24, 16)
+        .Line.ForeColor.RGB = RGB(255, 214, 168)
+        .Line.Weight = 1.25
+        .TextFrame2.TextRange.Text = labelText
+        .TextFrame2.TextRange.Font.Name = "Consolas"
+        .TextFrame2.TextRange.Font.Size = 10
+        .TextFrame2.TextRange.Font.Fill.ForeColor.RGB = RGB(255, 214, 168)
+        .TextFrame2.TextRange.Font.Bold = msoTrue
+        .TextFrame2.VerticalAnchor = msoAnchorMiddle
+        .TextFrame2.TextRange.ParagraphFormat.Alignment = msoAlignCenter
+        .OnAction = actionName
+        .Placement = xlFreeFloating
+    End With
+End Sub
+
+Private Function GetOrCreateTextBox(ByVal ws As Worksheet, ByVal shapeName As String) As Shape
+    On Error Resume Next
+    Set GetOrCreateTextBox = ws.Shapes(shapeName)
+    On Error GoTo 0
+
+    If GetOrCreateTextBox Is Nothing Then
+        Set GetOrCreateTextBox = ws.Shapes.AddTextbox(msoTextOrientationHorizontal, 0, 0, 20, 20)
+        GetOrCreateTextBox.Name = shapeName
+    End If
+End Function
+
+Private Function GetOrCreateShape(ByVal ws As Worksheet, ByVal shapeName As String, ByVal shapeType As MsoAutoShapeType) As Shape
+    On Error Resume Next
+    Set GetOrCreateShape = ws.Shapes(shapeName)
+    On Error GoTo 0
+
+    If GetOrCreateShape Is Nothing Then
+        Set GetOrCreateShape = ws.Shapes.AddShape(shapeType, 0, 0, 20, 20)
+        GetOrCreateShape.Name = shapeName
+    End If
+End Function
+
+Private Sub SetViewportText(ByVal textValue As String)
+    GetGameSheet.Shapes(SHAPE_VIEWPORT).TextFrame2.TextRange.Text = textValue
+End Sub
+
+Private Sub SetHudText(ByVal textValue As String)
+    GetGameSheet.Shapes(SHAPE_HUD).TextFrame2.TextRange.Text = textValue
+End Sub
+
+Private Sub SetMapText(ByVal textValue As String)
+    GetGameSheet.Shapes(SHAPE_MAP).TextFrame2.TextRange.Text = textValue
+End Sub
 
 Private Sub BindKeys()
     Application.OnKey "{UP}", "ExcelDoom_MoveForward"
